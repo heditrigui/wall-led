@@ -4,7 +4,7 @@ Control a Bluetooth LED strip from your PC or Android phone, and turn it into a 
 
 Made for the cheap **LEDDMX** controllers (they advertise as `LEDDMX-00-xxxx` / `LEDDMX-03-xxxx`) that normally come with the *LED LAMP* phone app. An open-source **LED LAMP app alternative** that runs in the browser with **Web Bluetooth**.
 
-**Try it:** open the GitHub Pages site of this repository (link in the **About** box) in Chrome or Edge. No strip? Add `?demo` to the address to click around the whole interface.
+**Try it:** open **[https://heditrigui.github.io/wall-led/](https://heditrigui.github.io/wall-led/)** in Chrome or Edge. No strip? Try the **[demo](https://heditrigui.github.io/wall-led/led-control.html?demo)** to click around the whole interface.
 
 <p align="center"><img src="docs/screenshot.png" width="380" alt="Wall LED control page: power, music show with modes and color themes, DJ buttons, color picker"></p>
 
@@ -21,7 +21,7 @@ No server, no account, no install on the PC: it's one HTML file.
 
 ## Use it on a PC (Windows, macOS, Linux, ChromeOS)
 
-1. Open the GitHub Pages site of this repository (the link in the **About** box) in **Chrome** or **Edge** (they support Web Bluetooth). You can also download [`led-control.html`](led-control.html) and open it from disk.
+1. Open **[https://heditrigui.github.io/wall-led/](https://heditrigui.github.io/wall-led/)** in **Chrome** or **Edge** (they support Web Bluetooth). You can also download [`led-control.html`](led-control.html) and open it from disk.
 2. Close the LED LAMP app on your phone first. The controller accepts only one connection at a time.
 3. Click **Connect** and pick your `LEDDMX-…` strip.
 
