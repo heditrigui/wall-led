@@ -17,7 +17,7 @@ No server, no account, no install on the PC: it's one HTML file.
 
 ## Use it on a PC (Windows, macOS, Linux, ChromeOS)
 
-1. Open **https://heditrigui.github.io/wall-led/** in **Chrome** or **Edge** (they support Web Bluetooth). You can also download [`led-control.html`](led-control.html) and open it from disk.
+1. Open the GitHub Pages site of this repository (the link in the **About** box) in **Chrome** or **Edge** (they support Web Bluetooth). You can also download [`led-control.html`](led-control.html) and open it from disk.
 2. Close the LED LAMP app on your phone first. The controller accepts only one connection at a time.
 3. Click **Connect** and pick your `LEDDMX-…` strip.
 
