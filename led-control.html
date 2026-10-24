@@ -1,0 +1,710 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wall LED Control</title>
+<style>
+  :root {
+    --bg: #f4f4f6; --card: #ffffff; --text: #1b1b1f; --muted: #6b6b75;
+    --border: #dedee4; --accent: #4f6bed; --on: #2fa66a; --off: #c94848;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #131316; --card: #1e1e23; --text: #ececf1; --muted: #9a9aa6;
+            --border: #34343c; --accent: #7d93ff; --on: #43c483; --off: #e06666; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.4 system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 20px 16px 40px; display: grid; gap: 14px; }
+  h1 { font-size: 20px; margin: 0; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; display: grid; gap: 12px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .label { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  button { font: inherit; border: 1px solid var(--border); background: var(--card); color: var(--text);
+           border-radius: 10px; padding: 9px 14px; cursor: pointer; user-select: none; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.on { background: var(--on); border-color: var(--on); color: #fff; }
+  button.off { background: var(--off); border-color: var(--off); color: #fff; }
+  button.sel { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  .big { flex: 1; padding: 14px; font-size: 16px; font-weight: 600; }
+  #status { font-size: 14px; color: var(--muted); }
+  #status.ok { color: var(--on); }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  input[type=color] { width: 64px; height: 44px; border: none; background: none; padding: 0; cursor: pointer; }
+  .swatches { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; }
+  .swatch { aspect-ratio: 1; border-radius: 50%; padding: 0; border: 2px solid var(--border); }
+  .presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
+  .val { min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+  select, input[type=number] { font: inherit; padding: 8px; border-radius: 10px; border: 1px solid var(--border);
+           background: var(--card); color: var(--text); }
+  input[type=number] { width: 80px; }
+  .disabled { opacity: .5; pointer-events: none; }
+  .note { font-size: 13px; color: var(--muted); margin: 0; }
+  .slider-row .label { min-width: 104px; }
+
+  .seg { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; }
+  .palettes { display: grid; grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); gap: 8px; }
+  .pal { padding: 6px; display: grid; gap: 4px; font-size: 13px; }
+  .pal .bar { height: 10px; border-radius: 5px; }
+
+  .stage { display: grid; grid-template-columns: 96px 1fr; gap: 14px; align-items: center; }
+  #preview { width: 96px; height: 96px; border-radius: 16px; background: #000; border: 1px solid var(--border);
+             transition: box-shadow .05s; }
+  .readout { display: grid; gap: 8px; }
+  #bpm { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+  #bpm small { font-size: 13px; font-weight: 400; color: var(--muted); }
+  #scene { font-size: 13px; color: var(--muted); min-height: 18px; }
+  .dots { display: flex; gap: 8px; }
+  .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--border); }
+  .dot.lit { background: var(--accent); }
+  .dot.lit.down { background: var(--off); }
+  #energy { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  #energy div { height: 100%; width: 0; background: var(--accent); }
+
+  .dj { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .dj button { padding: 16px 8px; font-weight: 700; letter-spacing: .05em; }
+  .dj button.active { background: var(--text); color: var(--bg); }
+  .dj kbd { display: block; font: 11px ui-monospace, monospace; opacity: .6; font-weight: 400; margin-top: 2px; }
+  label.check { display: flex; gap: 8px; align-items: center; font-size: 14px; cursor: pointer; }
+  label.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="row" style="justify-content:space-between">
+    <h1>Wall LED</h1>
+    <span id="status">Not connected</span>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button id="connect" class="primary big">Connect</button>
+    </div>
+    <p class="note" id="hint">Close the LED LAMP app on your phone first: the strip accepts only one connection at a time. Use Chrome or Edge.</p>
+  </div>
+
+  <div id="controls" class="disabled" style="display:grid;gap:14px">
+    <div class="card">
+      <div class="row">
+        <button id="pon" class="on big">On</button>
+        <button id="poff" class="off big">Off</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">Music</div>
+      <div class="seg" id="source">
+        <button data-v="mic" class="sel">🎤 Microphone</button>
+        <button data-v="pc">🔊 Computer sound</button>
+      </div>
+      <div class="row">
+        <button id="micBtn" class="primary big">Start the show</button>
+      </div>
+
+      <div class="stage">
+        <div id="preview"></div>
+        <div class="readout">
+          <div id="bpm">--- <small>BPM</small></div>
+          <div class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+          <div id="energy"><div></div></div>
+          <div id="scene">Not listening</div>
+        </div>
+      </div>
+
+      <div class="label">Mode</div>
+      <div class="seg" id="modes">
+        <button data-v="show" class="sel">Show</button>
+        <button data-v="strobe">Strobe</button>
+        <button data-v="pulse">Pulse</button>
+        <button data-v="spectrum">Spectrum</button>
+      </div>
+
+      <div class="label">Colors</div>
+      <div class="palettes" id="palettes"></div>
+
+      <div class="row slider-row">
+        <span class="label">Sensitivity</span>
+        <input type="range" id="sens" min="30" max="300" value="100">
+        <span class="val" id="sensVal">100%</span>
+      </div>
+      <div class="row slider-row">
+        <span class="label">Flash length</span>
+        <input type="range" id="flash" min="0" max="100" value="35">
+        <span class="val" id="flashVal">35%</span>
+      </div>
+      <div class="row slider-row">
+        <span class="label">Ambient glow</span>
+        <input type="range" id="glow" min="0" max="40" value="0">
+        <span class="val" id="glowVal">0%</span>
+      </div>
+      <div class="row slider-row">
+        <span class="label">Delay fix</span>
+        <input type="range" id="lead" min="0" max="250" value="90" step="10">
+        <span class="val" id="leadVal">90 ms</span>
+      </div>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="lock" checked> Lock to tempo</label>
+        <label class="check"><input type="checkbox" id="accent" checked> White hit on beat 1</label>
+        <label class="check"><input type="checkbox" id="autoDrop" checked> Auto drop</label>
+      </div>
+
+      <div class="label">DJ</div>
+      <div class="dj">
+        <button id="djStrobe">STROBE<kbd>hold Space</kbd></button>
+        <button id="djBlack">BLACKOUT<kbd>hold B</kbd></button>
+        <button id="djDrop">DROP!<kbd>D</kbd></button>
+      </div>
+      <p class="note">Computer sound: when Edge asks what to share, pick <b>Entire screen</b> and turn on <b>Share system audio</b>. Keys: 1–7 colors, M next mode. Picking a color, preset or effect below stops the show.</p>
+    </div>
+
+    <div class="card">
+      <div class="label">Color</div>
+      <div class="row">
+        <input type="color" id="color" value="#ffffff">
+        <span id="hex" class="val" style="text-align:left">#FFFFFF</span>
+      </div>
+      <div class="swatches" id="swatches"></div>
+    </div>
+
+    <div class="card">
+      <div class="label">Brightness</div>
+      <div class="row">
+        <input type="range" id="bright" min="1" max="100" value="100">
+        <span class="val" id="brightVal">100%</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">Presets</div>
+      <div class="presets" id="presets"></div>
+    </div>
+
+    <div class="card">
+      <div class="label">Built-in effects</div>
+      <div class="presets" id="effects"></div>
+      <div class="row">
+        <button id="effPrev">◀</button>
+        <input type="number" id="effNum" min="1" max="210" value="1">
+        <button id="effNext">▶</button>
+        <button id="effStop">Stop effect</button>
+      </div>
+      <p class="note">The controller has 210 built-in effects. Step through them with ◀ ▶.</p>
+    </div>
+  </div>
+</main>
+
+<script>
+// LEDDMX-xx controller (LED LAMP app). Service ffe0, characteristic ffe1, 9-byte frames.
+// Verified on LEDDMX-03-CC00: power on/off, color, brightness, effects.
+const SERVICE = 0xffe0, CHAR = 0xffe1;
+const frame = (...b) => new Uint8Array(b);
+const CMD = {
+  on:     () => frame(0x7b, 0x00, 0x04, 0x01, 0x00, 0x00, 0xff, 0x00, 0xbf),
+  off:    () => frame(0x7b, 0x00, 0x04, 0x00, 0x00, 0x00, 0xff, 0x00, 0xbf),
+  color:  (r, g, b) => frame(0x7b, 0xff, 0x07, r, g, b, 0x00, 0xff, 0xbf),
+  bright: (p) => frame(0x7b, 0xff, 0x01, Math.floor(p * 32 / 100), p, 0x00, 0xff, 0xff, 0xbf),
+  effect: (i) => frame(0x7b, 0xff, 0x03, i, 0xff, 0xff, 0xff, 0xff, 0xbf),
+};
+
+const $ = (id) => document.getElementById(id);
+let device = null, ch = null, wantConnected = false;
+
+// Inside the Android app there is no Web Bluetooth: provide the small part of it this page
+// uses, backed by the app's native bridge (window.AndroidBle).
+if (window.AndroidBle && !navigator.bluetooth) {
+  const onDisconnect = [];
+  let pendingConnect = null;
+  const characteristic = {
+    writeValueWithoutResponse: async (bytes) =>
+      AndroidBle.write([...bytes].map(b => b.toString(16).padStart(2, '0')).join('')),
+  };
+  const server = { getPrimaryService: async () => ({ getCharacteristic: async () => characteristic }) };
+  const nativeDevice = {
+    name: 'LEDDMX',
+    addEventListener: (type, fn) => { if (type === 'gattserverdisconnected') onDisconnect.push(fn); },
+    gatt: {
+      connect: () => new Promise((resolve, reject) => { pendingConnect = { resolve, reject }; AndroidBle.connect(); }),
+      disconnect: () => AndroidBle.disconnect(),
+    },
+  };
+  window.__ble = {
+    onStatus(state, detail) {
+      const p = pendingConnect;
+      if (state === 'connected') { nativeDevice.name = detail; pendingConnect = null; p?.resolve(server); }
+      else if (state === 'failed') { pendingConnect = null; p?.reject(new Error(detail)); $('hint').textContent = detail; }
+      else if (state === 'disconnected') onDisconnect.forEach(fn => fn());
+    },
+  };
+  Object.defineProperty(navigator, 'bluetooth', { value: { requestDevice: async () => nativeDevice } });
+  addEventListener('DOMContentLoaded', () => {
+    $('hint').textContent = 'Close the LED LAMP app first: the strip accepts only one connection at a time.';
+    $('source').querySelector('[data-v=pc]').remove();
+    $('palettes').closest('.card').querySelector('.note').textContent =
+      'Picking a color, preset or effect below stops the show. The screen stays on while the show runs.';
+  });
+}
+
+// One write at a time; while a write is in flight, keep only the latest pending frame per kind
+// so dragging a slider doesn't build up a backlog.
+const pending = new Map();
+let busy = false;
+function send(kind, bytes) {
+  pending.set(kind, bytes);
+  pump();
+}
+async function pump() {
+  if (busy || !ch) return;
+  busy = true;
+  try {
+    while (pending.size && ch) {
+      const [kind, bytes] = pending.entries().next().value;
+      pending.delete(kind);
+      try { await ch.writeValueWithoutResponse(bytes); }
+      catch (e) { console.warn('write failed', e); }
+      await new Promise(r => setTimeout(r, 40));
+    }
+  } finally { busy = false; }
+}
+
+function setStatus(text, ok) {
+  $('status').textContent = text;
+  $('status').className = ok ? 'ok' : '';
+  $('controls').classList.toggle('disabled', !ok);
+  $('connect').textContent = ok ? 'Disconnect' : 'Connect';
+}
+
+async function connectGatt() {
+  setStatus('Connecting…');
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const server = await device.gatt.connect();
+      const svc = await server.getPrimaryService(SERVICE);
+      ch = await svc.getCharacteristic(CHAR);
+      setStatus('Connected: ' + device.name, true);
+      return;
+    } catch (e) {
+      console.warn('connect attempt', attempt, e);
+      await new Promise(r => setTimeout(r, 800));
+    }
+  }
+  setStatus('Could not connect. Is the phone app closed?');
+}
+
+$('connect').onclick = async () => {
+  if (ch) {
+    wantConnected = false;
+    device.gatt.disconnect();
+    return;
+  }
+  if (!navigator.bluetooth) {
+    setStatus('Web Bluetooth not available. Open this page in Chrome or Edge.');
+    return;
+  }
+  try {
+    if (!device) {
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ namePrefix: 'LEDDMX' }, { services: [SERVICE] }],
+        optionalServices: [SERVICE],
+      });
+      device.addEventListener('gattserverdisconnected', () => {
+        ch = null;
+        setStatus('Disconnected');
+        if (wantConnected) setTimeout(connectGatt, 1000);
+      });
+    }
+    wantConnected = true;
+    await connectGatt();
+  } catch (e) {
+    if (e.name !== 'NotFoundError') setStatus('Error: ' + e.message);
+  }
+};
+
+// Power
+$('pon').onclick = () => send('power', CMD.on());
+$('poff').onclick = () => send('power', CMD.off());
+
+// Color
+function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+function setColor(hex) {
+  stopMusic();
+  $('color').value = hex;
+  $('hex').textContent = hex.toUpperCase();
+  send('color', CMD.color(...hexToRgb(hex)));
+}
+$('color').oninput = (e) => setColor(e.target.value);
+const SWATCHES = ['#ff0000', '#ff4000', '#ffb000', '#00ff00', '#00ffd0', '#0000ff', '#8000ff', '#ff00a0',
+                  '#ffffff', '#ffd9a0', '#ff8c40', '#ff2060', '#40a0ff', '#a0ff40', '#6000ff', '#ff60ff'];
+for (const c of SWATCHES) {
+  const b = document.createElement('button');
+  b.className = 'swatch'; b.style.background = c; b.title = c;
+  b.onclick = () => setColor(c);
+  $('swatches').append(b);
+}
+
+// Brightness
+function setBright(p) {
+  $('bright').value = p;
+  $('brightVal').textContent = p + '%';
+  send('bright', CMD.bright(p));
+}
+$('bright').oninput = (e) => setBright(+e.target.value);
+
+// Presets: color + brightness
+const PRESETS = [
+  ['Bright white', '#ffffff', 100], ['Warm white', '#ffb060', 80], ['Reading', '#ffd9a0', 100],
+  ['Movie', '#3020ff', 15], ['Night', '#ff3000', 5], ['Focus', '#a0d0ff', 90],
+  ['Sunset', '#ff5010', 60], ['Party pink', '#ff00a0', 100], ['Ocean', '#00a0ff', 70],
+];
+for (const [name, hex, br] of PRESETS) {
+  const b = document.createElement('button');
+  b.textContent = name;
+  b.onclick = () => { send('power', CMD.on()); setColor(hex); setBright(br); };
+  $('presets').append(b);
+}
+
+// Effects
+function setEffect(i) {
+  stopMusic();
+  i = Math.max(1, Math.min(210, i));
+  $('effNum').value = i;
+  send('effect', CMD.effect(i));
+}
+const EFFECTS = [['Effect 1', 1], ['Effect 2', 2], ['Effect 3', 3], ['Effect 10', 10],
+                 ['Effect 25', 25], ['Effect 50', 50]];
+for (const [name, i] of EFFECTS) {
+  const b = document.createElement('button');
+  b.textContent = name;
+  b.onclick = () => setEffect(i);
+  $('effects').append(b);
+}
+$('effPrev').onclick = () => setEffect(+$('effNum').value - 1);
+$('effNext').onclick = () => setEffect(+$('effNum').value + 1);
+$('effNum').onchange = () => setEffect(+$('effNum').value);
+$('effStop').onclick = () => setColor($('color').value);
+
+// ---------------------------------------------------------------------------
+// Music show: analyse microphone or computer sound and stream colors to the strip.
+// The tick is driven by an audio processing callback rather than a timer, so it keeps
+// running at full rate when this tab is in the background.
+
+const PALETTES = {
+  Neon:    ['#ff00a0', '#00e5ff', '#8000ff', '#ff2bd6', '#00ff9c'],
+  Fire:    ['#ff2000', '#ff6a00', '#ffb000', '#ff0030'],
+  Ocean:   ['#0030ff', '#00b0ff', '#00ffd0', '#5000ff'],
+  Jungle:  ['#00ff40', '#a0ff00', '#00ffa0', '#ffd000'],
+  Police:  ['#ff0000', '#0020ff'],
+  Rainbow: ['#ff0000', '#ff8000', '#ffff00', '#00ff00', '#00a0ff', '#4000ff', '#c000ff'],
+  Mine:    null, // the color picker's color
+};
+const opts = { source: 'mic', mode: 'show', palette: 'Neon' };
+const paletteRgb = () => (PALETTES[opts.palette] || [$('color').value]).map(hexToRgb);
+
+function segmented(id, key) {
+  const btns = [...$(id).children];
+  const pick = (v) => { opts[key] = v; btns.forEach(b => b.classList.toggle('sel', b.dataset.v === v)); };
+  btns.forEach(b => b.onclick = () => pick(b.dataset.v));
+  return pick;
+}
+const pickSource = segmented('source', 'source');
+const pickMode = segmented('modes', 'mode');
+
+const palButtons = Object.keys(PALETTES).map((name) => {
+  const b = document.createElement('button');
+  b.className = 'pal' + (name === opts.palette ? ' sel' : '');
+  b.dataset.v = name;
+  const cols = PALETTES[name];
+  const grad = cols ? `linear-gradient(90deg, ${cols.join(', ')})` : 'var(--pick, #fff)';
+  b.innerHTML = `<div class="bar" style="background:${grad}"></div>${name}`;
+  b.onclick = () => pickPalette(name);
+  $('palettes').append(b);
+  return b;
+});
+function pickPalette(name) {
+  opts.palette = name;
+  palButtons.forEach(b => b.classList.toggle('sel', b.dataset.v === name));
+}
+const syncPick = () => $('palettes').style.setProperty('--pick', $('color').value);
+$('color').addEventListener('input', syncPick); syncPick();
+
+for (const [id, unit] of [['sens', '%'], ['flash', '%'], ['glow', '%'], ['lead', ' ms']]) {
+  const show = () => { $(id + 'Val').textContent = $(id).value + unit; };
+  $(id).addEventListener('input', show); show();
+}
+
+// Manual DJ controls, read by the show on every tick.
+const dj = { strobe: false, black: false, dropAt: -1 };
+function holdButton(id, key) {
+  const el = $(id);
+  const set = (v) => { dj[key] = v; el.classList.toggle('active', v); };
+  el.addEventListener('pointerdown', () => set(true));
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(t => el.addEventListener(t, () => set(false)));
+  return set;
+}
+const setStrobe = holdButton('djStrobe', 'strobe');
+const setBlack = holdButton('djBlack', 'black');
+$('djDrop').onclick = () => { dj.dropAt = 0; };
+
+const MODES = ['show', 'strobe', 'pulse', 'spectrum'];
+addEventListener('keydown', (e) => {
+  if (!music || e.target.matches('input[type=number], select')) return;
+  if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) setStrobe(true); }
+  else if (e.code === 'KeyB') setBlack(true);
+  else if (e.code === 'KeyD' && !e.repeat) dj.dropAt = 0;
+  else if (e.code === 'KeyM') pickMode(MODES[(MODES.indexOf(opts.mode) + 1) % MODES.length]);
+  else if (/^Digit[1-7]$/.test(e.code)) pickPalette(Object.keys(PALETTES)[+e.code.slice(5) - 1]);
+});
+addEventListener('keyup', (e) => {
+  if (e.code === 'Space') setStrobe(false);
+  if (e.code === 'KeyB') setBlack(false);
+});
+
+let music = null;
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const scale = (rgb, k) => rgb.map(c => Math.round(c * clamp(k)));
+const mix = (a, b, t) => a.map((c, i) => Math.round(c + (b[i] - c) * t));
+const WHITE = [255, 255, 255], BLACK = [0, 0, 0];
+const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[s.length >> 1]; };
+
+async function getAudio() {
+  const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+  if (opts.source === 'mic') return navigator.mediaDevices.getUserMedia({ audio });
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio, systemAudio: 'include' });
+  stream.getVideoTracks().forEach(t => { t.enabled = false; });
+  if (!stream.getAudioTracks().length) {
+    stream.getTracks().forEach(t => t.stop());
+    throw new Error('No sound was shared. Pick "Entire screen" and turn on "Share system audio".');
+  }
+  return stream;
+}
+
+async function startMusic() {
+  let stream;
+  try { stream = await getAudio(); }
+  catch (e) {
+    $('scene').textContent = e.name === 'NotAllowedError'
+      ? 'Access was blocked. Allow it from the icon in the address bar.' : e.message;
+    return;
+  }
+  const ctx = new AudioContext();
+  const src = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.35;
+  // ~43 ms per tick at 48 kHz. Colors are only sent when they change, and fades are sent on
+  // every other tick at most, so the controller sees roughly 10-20 writes per second.
+  const tick = ctx.createScriptProcessor(2048, 1, 1);
+  const mute = ctx.createGain();
+  mute.gain.value = 0;
+  src.connect(analyser);
+  src.connect(tick);
+  tick.connect(mute).connect(ctx.destination);
+  stream.getAudioTracks()[0].addEventListener('ended', () => stopMusic());
+
+  const bins = new Uint8Array(analyser.frequencyBinCount);
+  const hz = ctx.sampleRate / analyser.fftSize;
+  const band = (lo, hi) => {
+    let sum = 0, n = 0;
+    for (let i = Math.max(1, Math.floor(lo / hz)); i <= Math.min(bins.length - 1, Math.ceil(hi / hz)); i++) { sum += bins[i]; n++; }
+    return n ? sum / n / 255 : 0;
+  };
+  // Auto-level: each band is divided by a slowly decaying peak so quiet and loud rooms both work.
+  const peak = { bass: 0.2, mid: 0.2, high: 0.2 };
+  const norm = (k, x) => { peak[k] = Math.max(x, peak[k] * 0.995, 0.05); return clamp(x / peak[k]); };
+
+  // An onset is a band jumping well above its own recent average.
+  const onset = (minRatio, minLevel, minGap) => {
+    const o = { avg: 0, last: -1 };
+    o.test = (x, now, sens) => {
+      const hit = x > o.avg * (minRatio / Math.sqrt(sens)) && x > minLevel / sens && now - o.last > minGap;
+      o.avg = o.avg * 0.85 + x * 0.15;
+      if (hit) o.last = now;
+      return hit;
+    };
+    return o;
+  };
+  const kick = onset(1.3, 0.18, 0.2), hat = onset(1.5, 0.06, 0.08);
+
+  const s = {
+    tickN: 0, sent: '', sentTick: 0,
+    env: 0, colorIdx: 0, beatCount: 0, accentTicks: 0, sparkle: 0, hue: 0,
+    shortE: 0, longE: 0.05, quietSince: -1, breakdown: false, dropUntil: -1,
+    kicks: [], bpm: 0, confident: false, nextBeat: 0, lastBeatAt: -9,
+  };
+
+  tick.onaudioprocess = () => {
+    analyser.getByteFrequencyData(bins);
+    const now = ctx.currentTime;
+    const sens = $('sens').value / 100;
+    const t = s.tickN++;
+
+    const kickRaw = band(40, 120), hatRaw = band(5000, 11000), vol = band(30, 8000);
+    const bass = clamp(norm('bass', band(30, 200)) * sens);
+    const mid = clamp(norm('mid', band(200, 2000)) * sens);
+    const high = clamp(norm('high', band(2000, 8000)) * sens);
+    const isKick = kick.test(kickRaw, now, sens);
+    const isHat = hat.test(hatRaw, now, sens);
+
+    // Energy: short (~0.2 s) vs long (~9 s) average tells breakdowns and drops apart.
+    s.shortE = s.shortE * 0.8 + vol * 0.2;
+    s.longE = s.longE * 0.995 + vol * 0.005;
+    const energy = clamp(s.shortE / (s.longE * 1.4 + 0.01));
+    if (s.shortE < s.longE * 0.55) {
+      if (s.quietSince < 0) s.quietSince = now;
+      if (now - s.quietSince > 2.5) s.breakdown = true;
+    } else s.quietSince = -1;
+    if (s.breakdown && isKick && s.shortE > s.longE * 0.85) {
+      s.breakdown = false;
+      if ($('autoDrop').checked) dj.dropAt = 0;
+    }
+    if (dj.dropAt === 0) { s.dropUntil = now + 1.6; dj.dropAt = -1; }
+    const dropping = now < s.dropUntil;
+
+    // Tempo: median gap between recent kicks, folded into 80-180 BPM.
+    if (isKick) {
+      s.kicks.push(now);
+      if (s.kicks.length > 16) s.kicks.shift();
+      const gaps = s.kicks.slice(1).map((k, i) => k - s.kicks[i]).filter(g => g > 0.25 && g < 1.5);
+      if (gaps.length >= 4) {
+        let p = median(gaps);
+        while (60 / p < 80) p /= 2;
+        while (60 / p > 180) p *= 2;
+        const fit = gaps.filter(g => { const r = g / p; return Math.abs(r - Math.round(r)) < 0.12; }).length / gaps.length;
+        s.bpm = 60 / p;
+        s.confident = fit > 0.6;
+      }
+    }
+    if (now - (s.kicks[s.kicks.length - 1] ?? -9) > 4) s.confident = false;
+
+    // Beat clock. Locked: flash on the predicted beat, early by the delay fix so light and
+    // sound land together, and nudge the phase toward real kicks. Unlocked: flash on kicks.
+    let beat = false;
+    const period = 60 / (s.bpm || 120);
+    if ($('lock').checked && s.confident) {
+      const lead = $('lead').value / 1000;
+      if (s.nextBeat < now - period) s.nextBeat = now + period;
+      if (now >= s.nextBeat - lead) { beat = true; s.lastBeatAt = s.nextBeat; s.nextBeat += period; }
+      if (isKick) {
+        const err = [s.lastBeatAt, s.nextBeat].reduce((a, b) => Math.abs(now - b) < Math.abs(now - a) ? b : a) ;
+        const e = now - err;
+        if (Math.abs(e) < period * 0.3) s.nextBeat += e * 0.35;
+      }
+    } else {
+      beat = isKick;
+      if (beat) s.nextBeat = now + period;
+    }
+
+    const pal = paletteRgb();
+    const decay = 0.45 + ($('flash').value / 100) * 0.5; // per tick
+    const glow = $('glow').value / 100;
+    if (beat) {
+      s.beatCount++;
+      s.colorIdx = (s.colorIdx + 1) % pal.length;
+      s.env = 1;
+      s.accentTicks = ($('accent').checked && s.beatCount % 4 === 1) ? 1 : 0;
+    } else s.env *= decay;
+    const base = pal[s.colorIdx % pal.length];
+
+    let rgb, scene;
+    if (dj.black) { rgb = BLACK; scene = 'Blackout'; }
+    else if (dj.strobe) { rgb = (t >> 1) % 2 ? BLACK : WHITE; scene = 'Strobe'; }
+    else if (dropping) {
+      // Drop: white strobe that speeds up, then lands on a full color hit.
+      const left = s.dropUntil - now;
+      rgb = left > 0.3 ? ((t >> (left > 0.9 ? 2 : 1)) % 2 ? BLACK : WHITE) : base;
+      if (left <= 0.3) s.env = 1;
+      scene = 'DROP!';
+    } else if (opts.mode === 'show') {
+      if (s.breakdown) {
+        // Quiet part: slow breathing in the palette, one breath per bar.
+        const ph = 0.5 + 0.5 * Math.sin(2 * Math.PI * now / (period * 4));
+        rgb = scale(mix(base, pal[(s.colorIdx + 1) % pal.length], ph), 0.08 + 0.4 * ph);
+        scene = 'Breakdown: waiting for the drop';
+      } else if (s.accentTicks > 0) {
+        s.accentTicks--; rgb = WHITE; scene = 'Beat 1';
+      } else {
+        if (isHat && s.env < 0.3) s.sparkle = 1;
+        const lvl = Math.max(s.env, glow, s.sparkle * 0.45 * energy);
+        const col = s.sparkle && s.env < 0.3 ? pal[(s.colorIdx + 1) % pal.length] : base;
+        rgb = scale(col, lvl);
+        s.sparkle = 0;
+        scene = s.confident && $('lock').checked ? 'Locked to tempo' : 'Following the kick';
+      }
+    } else if (opts.mode === 'strobe') {
+      rgb = s.env > 0.5 ? base : scale(base, glow);
+      scene = 'Strobe on kick';
+    } else if (opts.mode === 'pulse') {
+      s.hue = (s.hue + 0.02) % pal.length;
+      const i = Math.floor(s.hue);
+      const col = mix(pal[i], pal[(i + 1) % pal.length], s.hue - i);
+      rgb = scale(col, Math.max(glow, 0.05 + 0.95 * Math.max(s.env, bass) ** 1.5));
+      scene = 'Pulse';
+    } else {
+      rgb = [bass, mid, high].map(x => Math.round(255 * x ** 2));
+      scene = 'Spectrum: bass red, mids green, highs blue';
+    }
+
+    // Send changes only. Hard cuts (flashes, strobes) go out at once; fades every other tick.
+    const key = rgb.join();
+    const hard = beat || dj.strobe || dj.black || dropping || s.env === 1;
+    if (key !== s.sent && (hard || t - s.sentTick >= 2)) {
+      send('color', CMD.color(...rgb));
+      s.sent = key; s.sentTick = t;
+    }
+    music.view = { rgb, scene, energy, bpm: s.confident ? s.bpm : 0, beatCount: s.beatCount, beatAt: beat ? now : music.view?.beatAt };
+  };
+
+  music = { stream, ctx, view: null };
+  window.AndroidBle?.keepScreenOn(true);
+  send('power', CMD.on());
+  send('bright', CMD.bright(100));
+  $('micBtn').textContent = 'Stop the show';
+  $('micBtn').className = 'off big';
+  drawView();
+}
+
+function stopMusic() {
+  if (!music) return;
+  music.stream.getTracks().forEach(t => t.stop());
+  music.ctx.close();
+  music = null;
+  window.AndroidBle?.keepScreenOn(false);
+  setStrobe(false); setBlack(false);
+  $('micBtn').textContent = 'Start the show';
+  $('micBtn').className = 'primary big';
+  $('scene').textContent = 'Not listening';
+  $('preview').style.background = '#000';
+  $('preview').style.boxShadow = 'none';
+}
+
+function drawView() {
+  if (!music) return;
+  const v = music.view;
+  if (v) {
+    const c = `rgb(${v.rgb})`;
+    $('preview').style.background = c;
+    $('preview').style.boxShadow = v.rgb.some(x => x > 30) ? `0 0 32px ${c}` : 'none';
+    $('bpm').innerHTML = (v.bpm ? Math.round(v.bpm) : '---') + ' <small>BPM</small>';
+    $('scene').textContent = v.scene;
+    $('energy').firstElementChild.style.width = Math.round(v.energy * 100) + '%';
+    const dots = $('bpm').parentElement.querySelectorAll('.dot');
+    const fresh = v.beatAt !== undefined && music.ctx.currentTime - v.beatAt < 0.15;
+    dots.forEach((d, i) => {
+      d.classList.toggle('lit', fresh && (v.beatCount - 1) % 4 === i);
+      d.classList.toggle('down', i === 0);
+    });
+  }
+  requestAnimationFrame(drawView);
+}
+
+$('micBtn').onclick = () => {
+  if (!music) { startMusic(); return; }
+  stopMusic();
+  send('color', CMD.color(...hexToRgb($('color').value)));
+  send('bright', CMD.bright(+$('bright').value));
+};
+</script>
+</body>
+</html>

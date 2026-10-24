@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A strip of five glowing LEDs on a wall bar. 108dp canvas, art inside the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#33FFFFFF"
+        android:pathData="M24,48h60a6,6 0,0 1,6 6v0a6,6 0,0 1,-6 6h-60a6,6 0,0 1,-6 -6v0a6,6 0,0 1,6 -6z" />
+    <path android:fillColor="#FF00A0" android:pathData="M30,54m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <path android:fillColor="#8000FF" android:pathData="M42,54m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <path android:fillColor="#00E5FF" android:pathData="M54,54m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <path android:fillColor="#00FF9C" android:pathData="M66,54m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <path android:fillColor="#FFB000" android:pathData="M78,54m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <path android:fillColor="#66FFFFFF"
+        android:pathData="M30,40l3,-6M42,40l0,-7M54,40l0,-8M66,40l0,-7M78,40l-3,-6"
+        android:strokeColor="#88FFFFFF" android:strokeWidth="2" android:strokeLineCap="round" />
+</vector>
