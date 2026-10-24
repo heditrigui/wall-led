@@ -2,7 +2,11 @@
 
 Control a Bluetooth LED strip from your PC or Android phone, and turn it into a music light show.
 
-Made for the cheap **LEDDMX** controllers (they advertise as `LEDDMX-00-xxxx` / `LEDDMX-03-xxxx`) that normally come with the *LED LAMP* phone app.
+Made for the cheap **LEDDMX** controllers (they advertise as `LEDDMX-00-xxxx` / `LEDDMX-03-xxxx`) that normally come with the *LED LAMP* phone app. An open-source **LED LAMP app alternative** that runs in the browser with **Web Bluetooth**.
+
+**Try it:** open the GitHub Pages site of this repository (link in the **About** box) in Chrome or Edge. No strip? Add `?demo` to the address to click around the whole interface.
+
+<p align="center"><img src="docs/screenshot.png" width="380" alt="Wall LED control page: power, music show with modes and color themes, DJ buttons, color picker"></p>
 
 - **On / off, color, brightness, presets**
 - **210 built-in effects** of the controller

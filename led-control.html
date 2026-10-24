@@ -83,7 +83,7 @@
     <div class="row">
       <button id="connect" class="primary big">Connect</button>
     </div>
-    <p class="note" id="hint">Close the LED LAMP app on your phone first: the strip accepts only one connection at a time. Use Chrome or Edge.</p>
+    <p class="note" id="hint">Close the LED LAMP app on your phone first: the strip accepts only one connection at a time. Use Chrome or Edge. No strip? <a href="?demo">Try the demo</a>.</p>
   </div>
 
   <div id="controls" class="disabled" style="display:grid;gap:14px">
@@ -293,7 +293,22 @@ async function connectGatt() {
   setStatus('Could not connect. Is the phone app closed?');
 }
 
+// Demo mode (?demo): every control works and the music show runs, but nothing is sent anywhere.
+const demo = new URLSearchParams(location.search).has('demo');
+if (demo) {
+  ch = { writeValueWithoutResponse: async () => {} };
+  addEventListener('DOMContentLoaded', () => {
+    setStatus('Demo mode: no strip', true);
+    $('connect').textContent = 'Leave demo';
+    $('hint').textContent = 'Nothing is sent to a strip in demo mode. The colour square in the Music card shows what the strip would do.';
+  });
+}
+
 $('connect').onclick = async () => {
+  if (demo) {
+    location.search = '';
+    return;
+  }
   if (ch) {
     wantConnected = false;
     device.gatt.disconnect();
