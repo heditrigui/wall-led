@@ -205,6 +205,329 @@
   </div>
 </main>
 
+<!-- Tempo detector from BeatSense (https://github.com/heditrigui/beatsense, docs/tempo.js),
+     MIT License, Copyright (c) 2026 The BeatSense contributors. Copied in so this page stays one file. -->
+<script data-test>
+/*
+ * Real-time tempo detection, a JavaScript port of the Android app's TempoDetector.kt.
+ *
+ * 1. Spectral flux: every hop, an FFT frame is compared with the previous one and the
+ *    increases in (log) energy across all frequencies are summed. Drum hits and note
+ *    attacks make this "onset strength" spike.
+ * 2. Autocorrelation of the last `windowSeconds` of onset strength reveals how often the
+ *    spikes repeat. Harmonics (2x and 3x the period) are added so the true beat wins over
+ *    sub-divisions, and a gentle preference around 120 BPM settles half/double ambiguity.
+ * 3. The beat phase is found by sliding a comb at the detected period over the onsets,
+ *    so the UI can pulse in time with the music.
+ *
+ * Works in browsers (window.BeatSense) and in Node (require) for the tests.
+ */
+(function (root) {
+  'use strict';
+
+  const MIN_BPM = 50;
+  const MAX_BPM = 220;
+
+  /** In-place radix-2 complex FFT of a fixed power-of-two size. */
+  class Fft {
+    constructor(n) {
+      if (n < 2 || (n & (n - 1)) !== 0) throw new Error('FFT size must be a power of two');
+      this.n = n;
+      this.cos = new Float64Array(n / 2);
+      this.sin = new Float64Array(n / 2);
+      for (let i = 0; i < n / 2; i++) {
+        this.cos[i] = Math.cos((2 * Math.PI * i) / n);
+        this.sin[i] = Math.sin((2 * Math.PI * i) / n);
+      }
+      const bits = Math.log2(n);
+      this.reversed = new Uint32Array(n);
+      for (let i = 0; i < n; i++) {
+        let r = 0;
+        for (let b = 0; b < bits; b++) r = (r << 1) | ((i >> b) & 1);
+        this.reversed[i] = r;
+      }
+    }
+
+    transform(re, im) {
+      const n = this.n;
+      for (let i = 0; i < n; i++) {
+        const j = this.reversed[i];
+        if (j > i) {
+          let t = re[i]; re[i] = re[j]; re[j] = t;
+          t = im[i]; im[i] = im[j]; im[j] = t;
+        }
+      }
+      for (let size = 2; size <= n; size *= 2) {
+        const half = size / 2;
+        const step = n / size;
+        for (let start = 0; start < n; start += size) {
+          let k = 0;
+          for (let j = start; j < start + half; j++) {
+            const c = this.cos[k];
+            const s = this.sin[k];
+            const tr = re[j + half] * c + im[j + half] * s;
+            const ti = im[j + half] * c - re[j + half] * s;
+            re[j + half] = re[j] - tr;
+            im[j + half] = im[j] - ti;
+            re[j] += tr;
+            im[j] += ti;
+            k += step;
+          }
+        }
+      }
+    }
+  }
+
+  class TempoDetector {
+    constructor(inputRate, windowSeconds = 12) {
+      this.decimation = inputRate >= 32000 ? 2 : 1;
+      this.rate = inputRate / this.decimation;
+      this.frameSize = 1024;
+      this.hop = 128;
+      this.framesPerSecond = this.rate / this.hop;
+
+      this.fft = new Fft(this.frameSize);
+      this.window = new Float64Array(this.frameSize);
+      for (let i = 0; i < this.frameSize; i++) {
+        this.window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (this.frameSize - 1));
+      }
+      this.re = new Float64Array(this.frameSize);
+      this.im = new Float64Array(this.frameSize);
+      this.prevSpectrum = new Float64Array(this.frameSize / 2);
+      this.circular = new Float32Array(this.frameSize);
+      this.envCapacity = Math.floor(windowSeconds * this.framesPerSecond);
+      this.envelope = new Float64Array(this.envCapacity);
+      this.reset();
+    }
+
+    reset() {
+      this.writePos = 0;
+      this.filled = 0;
+      this.sinceHop = 0;
+      this.decimAcc = 0;
+      this.decimCount = 0;
+      this.envWrite = 0;
+      this.envCount = 0;
+      this.havePrev = false;
+      /** Loudness of the latest frame, 0..1 (rough, for a level meter). */
+      this.level = 0;
+      this.prevSpectrum.fill(0);
+    }
+
+    /** Feed mono samples in [-1, 1] as they arrive. */
+    feed(samples) {
+      for (let i = 0; i < samples.length; i++) {
+        const s = samples[i];
+        if (this.decimation === 2) {
+          this.decimAcc += s;
+          if (++this.decimCount < 2) continue;
+          this._push(this.decimAcc / 2);
+          this.decimAcc = 0;
+          this.decimCount = 0;
+        } else {
+          this._push(s);
+        }
+      }
+    }
+
+    _push(sample) {
+      this.circular[this.writePos] = sample;
+      this.writePos = (this.writePos + 1) % this.frameSize;
+      if (this.filled < this.frameSize) this.filled++;
+      if (++this.sinceHop >= this.hop && this.filled === this.frameSize) {
+        this.sinceHop = 0;
+        this._analyseFrame();
+      }
+    }
+
+    _analyseFrame() {
+      const n = this.frameSize;
+      const re = this.re;
+      const im = this.im;
+      let energy = 0;
+      for (let i = 0; i < n; i++) {
+        const s = this.circular[(this.writePos + i) % n];
+        energy += s * s;
+        re[i] = s * this.window[i];
+        im[i] = 0;
+      }
+      this.level = Math.min(1, Math.sqrt(energy / n) * 4);
+      this.fft.transform(re, im);
+
+      let flux = 0;
+      for (let k = 1; k < n / 2; k++) {
+        const mag = Math.log(1 + 100 * Math.hypot(re[k], im[k]));
+        if (this.havePrev) flux += Math.max(0, mag - this.prevSpectrum[k]);
+        this.prevSpectrum[k] = mag;
+      }
+      this.havePrev = true;
+
+      this.envelope[this.envWrite] = flux;
+      this.envWrite = (this.envWrite + 1) % this.envCapacity;
+      if (this.envCount < this.envCapacity) this.envCount++;
+    }
+
+    /** Onset strength over the analysis window, oldest first. */
+    envelopeSnapshot() {
+      const out = new Float64Array(this.envCount);
+      const start = (this.envWrite - this.envCount + this.envCapacity) % this.envCapacity;
+      for (let i = 0; i < this.envCount; i++) out[i] = this.envelope[(start + i) % this.envCapacity];
+      return out;
+    }
+
+    /**
+     * Current tempo, folded into [rangeLow, rangeHigh): rhythm is ambiguous by octaves (a 128 BPM
+     * house track also "pulses" at 64), so the caller picks the musical range it expects.
+     */
+    estimate(rangeLow = 80, rangeHigh = 160) {
+      const fps = this.framesPerSecond;
+      const n = this.envCount;
+      if (n < fps * 4) return null;
+      const raw = this.envelopeSnapshot();
+
+      // Remove the slowly varying loudness so only the spikes remain.
+      const half = Math.floor(fps * 0.2);
+      const prefix = new Float64Array(n + 1);
+      for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i] + raw[i];
+      const d = new Float64Array(n);
+      for (let t = 0; t < n; t++) {
+        const a = Math.max(0, t - half);
+        const b = Math.min(n, t + half + 1);
+        d[t] = Math.max(0, raw[t] - (prefix[b] - prefix[a]) / (b - a));
+      }
+
+      const minLag = Math.max(2, Math.floor((60 * fps) / MAX_BPM));
+      const maxLag = Math.floor((60 * fps) / MIN_BPM) + 1;
+      if (maxLag >= Math.floor(n / 2)) return null;
+      const acfLen = Math.min(n - 1, 3 * maxLag + 2);
+      const acf = new Float64Array(acfLen + 1);
+      for (let lag = 0; lag <= acfLen; lag++) {
+        let s = 0;
+        for (let t = 0; t < n - lag; t++) s += d[t] * d[t + lag];
+        acf[lag] = s / (n - lag);
+      }
+      if (acf[0] < 1e-9) return null;
+
+      const acfAt = (x) => {
+        const i = Math.floor(x);
+        if (i < 0 || i + 1 > acfLen) return 0;
+        const f = x - i;
+        return acf[i] * (1 - f) + acf[i + 1] * f;
+      };
+      const score = (lag) => {
+        const bpm = (60 * fps) / lag;
+        const octaves = Math.log(bpm / 120) / Math.log(2);
+        const prior = Math.exp(-0.5 * octaves * octaves);
+        return (acfAt(lag) + 0.5 * acfAt(2 * lag) + 0.25 * acfAt(3 * lag)) * prior;
+      };
+
+      // 1) Strongest periodicity on whole lags.
+      let bestLag = minLag;
+      let bestScore = -1;
+      for (let lag = minLag; lag <= maxLag; lag++) {
+        const s = score(lag);
+        if (s > bestScore) { bestScore = s; bestLag = lag; }
+      }
+      const rawBpm = (60 * fps) / bestLag;
+
+      // 2) Fold into the requested range, then polish the period on a fine fractional grid.
+      const folded = TempoDetector.fold(rawBpm, rangeLow, rangeHigh);
+      const centre = (60 * fps) / folded;
+      let lag = centre;
+      let lagScore = -1;
+      for (let x = centre - 1.2; x <= centre + 1.2; x += 0.01) {
+        const s = acfAt(x) + 0.5 * acfAt(2 * x);
+        if (s > lagScore) { lagScore = s; lag = x; }
+      }
+      const bpm = (60 * fps) / lag;
+
+      // Confidence: how far the beat peak stands above the average periodicity, gated by
+      // loudness so hum, tones and room noise don't look like a groove.
+      let mean = 0;
+      for (let i = minLag; i <= maxLag; i++) mean += acf[i];
+      mean /= maxLag - minLag + 1;
+      const contrast = (Math.max(acfAt(lag), acfAt(2 * lag)) - mean) / acf[0];
+      let rawMean = 0;
+      for (let i = 0; i < n; i++) rawMean += raw[i];
+      rawMean /= n;
+      const loudness = Math.min(1, Math.max(0, (rawMean - 5) / 15));
+      const confidence = Math.min(1, Math.max(0, contrast * 1.6)) * loudness;
+
+      // 3) Beat phase: where a comb with this period lines up best with the most recent onsets.
+      let bestPhase = 0;
+      let bestPhaseScore = -1;
+      const recent = Math.min(n, Math.floor(fps * 6));
+      for (let phase = 0; phase < Math.floor(lag); phase++) {
+        let s = 0;
+        for (let pos = n - 1 - phase; pos >= n - recent; pos -= lag) {
+          const i = Math.floor(pos);
+          s += d[i] + 0.5 * (i > 0 ? d[i - 1] : 0) + 0.5 * (i < n - 1 ? d[i + 1] : 0);
+        }
+        if (s > bestPhaseScore) { bestPhaseScore = s; bestPhase = phase; }
+      }
+
+      return { bpm, confidence, periodSec: lag / fps, lastBeatAgoSec: bestPhase / fps };
+    }
+
+    /** Brings a tempo into [low, high) by doubling or halving, e.g. 64 -> 128 for a dance range. */
+    static fold(bpm, low, high) {
+      let b = bpm;
+      while (b < low) b *= 2;
+      while (b >= high) b /= 2;
+      return b;
+    }
+  }
+
+  const api = { Fft, TempoDetector };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else root.BeatSense = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+<script data-test>
+// Beat clock for the music show, locked to the tempo detector: the detector's period and last
+// beat set the clock, and later estimates nudge its phase so small errors don't jump.
+class BeatClock {
+  constructor() { this.locked = false; this.period = 0.5; this.next = 0; this.lastBeat = -9; this.misses = 0; this.outliers = 0; }
+
+  /** est: TempoDetector.estimate() made with audio up to time now (seconds). */
+  update(est, now) {
+    // Lock on a clear beat; once locked, hold on through weaker stretches.
+    if (!est || est.confidence < (this.locked ? 0.08 : 0.15)) {
+      if (++this.misses > 4) this.locked = false;
+      return;
+    }
+    this.misses = 0;
+    // A beat time according to the detector. Its onsets show up ~22 ms after the attack
+    // (half an analysis frame), so move them back.
+    const grid = now - est.lastBeatAgoSec - 0.022;
+    if (!this.locked || Math.abs(est.periodSec - this.period) > this.period * 0.04) {
+      this.period = est.periodSec;
+      this.next = grid + Math.ceil((now - grid) / this.period - 0.25) * this.period;
+      this.locked = true;
+      return;
+    }
+    this.period += (est.periodSec - this.period) * 0.3;
+    // Phase error in beats, -0.5..0.5. Small errors are eased out. A big one is often the
+    // detector briefly hearing the off-beat, so the clock only jumps if it persists.
+    let off = (grid - this.next) / this.period;
+    off -= Math.round(off);
+    if (Math.abs(off) < 0.15) { this.next += off * this.period * 0.5; this.outliers = 0; }
+    else if (++this.outliers >= 3) { this.next += off * this.period; this.outliers = 0; }
+  }
+
+  /** True once per beat, lead seconds before it, so light and sound land together. */
+  tick(now, lead) {
+    if (!this.locked) return false;
+    while (this.next < now - this.period) this.next += this.period;
+    if (now < this.next - lead || this.next - this.lastBeat < this.period * 0.5) return false;
+    this.lastBeat = this.next;
+    this.next += this.period;
+    return true;
+  }
+
+  get bpm() { return this.locked ? 60 / this.period : 0; }
+}
+</script>
 <script>
 // LEDDMX-xx controller (LED LAMP app). Service ffe0, characteristic ffe1, 9-byte frames.
 // Verified on LEDDMX-03-CC00: power on/off, color, brightness, effects.
@@ -545,7 +868,6 @@ const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
 const scale = (rgb, k) => rgb.map(c => Math.round(c * clamp(k)));
 const mix = (a, b, t) => a.map((c, i) => Math.round(c + (b[i] - c) * t));
 const WHITE = [255, 255, 255], BLACK = [0, 0, 0];
-const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s[s.length >> 1]; };
 
 async function getAudio() {
   const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
@@ -606,15 +928,19 @@ async function startMusic() {
   };
   const kick = onset(1.3, 0.18, 0.2), hat = onset(1.5, 0.06, 0.08);
 
+  // Tempo and beat phase come from BeatSense's detector, which looks at the last 10 s.
+  const detector = new BeatSense.TempoDetector(ctx.sampleRate, 10);
+  const clock = new BeatClock();
+
   const s = {
     tickN: 0, sent: '', sentTick: 0,
     env: 0, colorIdx: 0, beatCount: 0, accentTicks: 0, sparkle: 0, hue: 0,
     shortE: 0, longE: 0.05, quietSince: -1, breakdown: false, dropUntil: -1,
-    kicks: [], bpm: 0, confident: false, nextBeat: 0, lastBeatAt: -9,
   };
 
-  tick.onaudioprocess = () => {
+  tick.onaudioprocess = (e) => {
     analyser.getByteFrequencyData(bins);
+    detector.feed(e.inputBuffer.getChannelData(0));
     const now = ctx.currentTime;
     const sens = $('sens').value / 100;
     const t = s.tickN++;
@@ -641,39 +967,14 @@ async function startMusic() {
     if (dj.dropAt === 0) { s.dropUntil = now + 1.6; dj.dropAt = -1; }
     const dropping = now < s.dropUntil;
 
-    // Tempo: median gap between recent kicks, folded into 80-180 BPM.
-    if (isKick) {
-      s.kicks.push(now);
-      if (s.kicks.length > 16) s.kicks.shift();
-      const gaps = s.kicks.slice(1).map((k, i) => k - s.kicks[i]).filter(g => g > 0.25 && g < 1.5);
-      if (gaps.length >= 4) {
-        let p = median(gaps);
-        while (60 / p < 80) p /= 2;
-        while (60 / p > 180) p *= 2;
-        const fit = gaps.filter(g => { const r = g / p; return Math.abs(r - Math.round(r)) < 0.12; }).length / gaps.length;
-        s.bpm = 60 / p;
-        s.confident = fit > 0.6;
-      }
-    }
-    if (now - (s.kicks[s.kicks.length - 1] ?? -9) > 4) s.confident = false;
+    // Tempo: a fresh estimate about twice a second, folded into 80-160 BPM.
+    if (t % 12 === 0) clock.update(detector.estimate(80, 160), now);
+    const locked = $('lock').checked && clock.locked;
 
-    // Beat clock. Locked: flash on the predicted beat, early by the delay fix so light and
-    // sound land together, and nudge the phase toward real kicks. Unlocked: flash on kicks.
-    let beat = false;
-    const period = 60 / (s.bpm || 120);
-    if ($('lock').checked && s.confident) {
-      const lead = $('lead').value / 1000;
-      if (s.nextBeat < now - period) s.nextBeat = now + period;
-      if (now >= s.nextBeat - lead) { beat = true; s.lastBeatAt = s.nextBeat; s.nextBeat += period; }
-      if (isKick) {
-        const err = [s.lastBeatAt, s.nextBeat].reduce((a, b) => Math.abs(now - b) < Math.abs(now - a) ? b : a) ;
-        const e = now - err;
-        if (Math.abs(e) < period * 0.3) s.nextBeat += e * 0.35;
-      }
-    } else {
-      beat = isKick;
-      if (beat) s.nextBeat = now + period;
-    }
+    // Beat: locked, flash on the predicted beat, early by the delay fix so light and sound
+    // land together. Otherwise flash on kicks.
+    const beat = locked ? clock.tick(now, $('lead').value / 1000) : isKick;
+    const period = clock.locked ? clock.period : 0.5;
 
     const pal = paletteRgb();
     const decay = 0.45 + ($('flash').value / 100) * 0.5; // per tick
@@ -709,7 +1010,7 @@ async function startMusic() {
         const col = s.sparkle && s.env < 0.3 ? pal[(s.colorIdx + 1) % pal.length] : base;
         rgb = scale(col, lvl);
         s.sparkle = 0;
-        scene = s.confident && $('lock').checked ? 'Locked to tempo' : 'Following the kick';
+        scene = locked ? 'Locked to tempo' : 'Following the kick';
       }
     } else if (opts.mode === 'strobe') {
       rgb = s.env > 0.5 ? base : scale(base, glow);
@@ -732,7 +1033,7 @@ async function startMusic() {
       send('color', CMD.color(...rgb));
       s.sent = key; s.sentTick = t;
     }
-    music.view = { rgb, scene, energy, bpm: s.confident ? s.bpm : 0, beatCount: s.beatCount, beatAt: beat ? now : music.view?.beatAt };
+    music.view = { rgb, scene, energy, bpm: clock.bpm, beatCount: s.beatCount, beatAt: beat ? now : music.view?.beatAt };
   };
 
   music = { stream, ctx, view: null };
