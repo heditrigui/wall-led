@@ -71,6 +71,8 @@
   label.check { display: flex; gap: 8px; align-items: center; font-size: 14px; cursor: pointer; }
   label.check input { accent-color: var(--accent); width: 16px; height: 16px; }
 
+  .chip { width: 44px; height: 44px; border-radius: 10px; background: #000; border: 1px solid var(--border); flex: none; }
+
   #strips { display: grid; gap: 8px; }
   #strips:empty { display: none; }
   .strip { display: grid; grid-template-columns: 1fr auto auto auto; gap: 6px; align-items: center; }
@@ -167,6 +169,24 @@
         <button id="djDrop">DROP!<kbd>D</kbd></button>
       </div>
       <p class="note">Computer sound: when Edge asks what to share, pick <b>Entire screen</b> and turn on <b>Share system audio</b>. Keys: 1–7 colors, M next mode. Picking a color, preset or effect below stops the show.</p>
+    </div>
+
+    <div class="card" id="screenCard">
+      <div class="label">Screen sync</div>
+      <div class="row">
+        <div id="screenPreview" class="chip"></div>
+        <button id="screenBtn" class="primary big">Sync with the screen</button>
+      </div>
+      <div class="seg" id="screenMode">
+        <button data-v="vivid" class="sel">Vivid</button>
+        <button data-v="average">Average</button>
+      </div>
+      <div class="row slider-row">
+        <span class="label">Smoothing</span>
+        <input type="range" id="smooth" min="0" max="95" value="60">
+        <span class="val" id="smoothVal">60%</span>
+      </div>
+      <p class="note" id="screenNote">The strip follows the colors on your screen, like an ambient light behind a TV or monitor. Pick the screen or window to follow; it keeps going while this tab is in the background.</p>
     </div>
 
     <div class="card">
@@ -527,6 +547,26 @@ class BeatClock {
 
   get bpm() { return this.locked ? 60 / this.period : 0; }
 }
+
+// Screen sync: one color for the strip from a small RGBA thumbnail of the screen. "average" is
+// the plain mean. "vivid" takes the hue mostly from saturated, bright pixels, so a dark scene
+// with a red sign glows red rather than brown, and the brightness from the whole picture.
+function screenColor(px, mode) {
+  let r = 0, g = 0, b = 0, w = 0, lum = 0;
+  for (let i = 0; i < px.length; i += 4) {
+    const R = px[i], G = px[i + 1], B = px[i + 2];
+    const max = Math.max(R, G, B), min = Math.min(R, G, B);
+    lum += max;
+    const k = mode === 'vivid' ? ((max - min) / 255) ** 2 * (max / 255) + 0.002 : 1;
+    r += R * k; g += G * k; b += B * k; w += k;
+  }
+  let c = [r / w, g / w, b / w];
+  if (mode === 'vivid') {
+    const peak = Math.max(...c, 1);
+    c = c.map(x => x * (lum / (px.length / 4)) / peak);
+  }
+  return c.map(x => Math.round(Math.min(255, x)));
+}
 </script>
 <script>
 // LEDDMX-xx controller (LED LAMP app). Service ffe0, characteristic ffe1, 9-byte frames.
@@ -731,7 +771,7 @@ $('poff').onclick = () => send('power', CMD.off());
 // Color
 function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
 function setColor(hex) {
-  stopMusic();
+  stopShows();
   $('color').value = hex;
   $('hex').textContent = hex.toUpperCase();
   send('color', CMD.color(...hexToRgb(hex)));
@@ -769,7 +809,7 @@ for (const [name, hex, br] of PRESETS) {
 
 // Effects
 function setEffect(i) {
-  stopMusic();
+  stopShows();
   i = Math.max(1, Math.min(210, i));
   $('effNum').value = i;
   send('effect', CMD.effect(i));
@@ -831,7 +871,7 @@ function pickPalette(name) {
 const syncPick = () => $('palettes').style.setProperty('--pick', $('color').value);
 $('color').addEventListener('input', syncPick); syncPick();
 
-for (const [id, unit] of [['sens', '%'], ['flash', '%'], ['glow', '%'], ['lead', ' ms']]) {
+for (const [id, unit] of [['sens', '%'], ['flash', '%'], ['glow', '%'], ['lead', ' ms'], ['smooth', '%']]) {
   const show = () => { $(id + 'Val').textContent = $(id).value + unit; };
   $(id).addEventListener('input', show); show();
 }
@@ -882,6 +922,7 @@ async function getAudio() {
 }
 
 async function startMusic() {
+  stopScreen();
   let stream;
   try { stream = await getAudio(); }
   catch (e) {
@@ -1085,6 +1126,96 @@ $('micBtn').onclick = () => {
   send('color', CMD.color(...hexToRgb($('color').value)));
   send('bright', CMD.bright(+$('bright').value));
 };
+
+// ---------------------------------------------------------------------------
+// Screen sync: capture the screen, shrink a frame to a 48x27 thumbnail about ten times a second,
+// turn it into one color, smooth it and send it. Frames are read with MediaStreamTrackProcessor
+// where available, which keeps running while this tab is in the background.
+
+let screen = null, screenMode = 'vivid';
+for (const b of $('screenMode').children) {
+  b.onclick = () => {
+    screenMode = b.dataset.v;
+    for (const o of $('screenMode').children) o.classList.toggle('sel', o === b);
+  };
+}
+
+async function startScreen() {
+  stopMusic();
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false, selfBrowserSurface: 'exclude' });
+  } catch (e) {
+    $('screenNote').textContent = e.name === 'NotAllowedError' ? 'Screen sharing was cancelled or blocked.' : e.message;
+    return;
+  }
+  const track = stream.getVideoTracks()[0];
+  const W = 48, H = 27;
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const g = canvas.getContext('2d', { willReadFrequently: true });
+  const me = screen = { stream, rgb: null, sent: null, last: 0, timer: 0 };
+  track.addEventListener('ended', () => stopScreen());
+  send('power', CMD.on());
+
+  const frame = (img) => {
+    const now = performance.now();
+    if (now - me.last < 95) return;
+    me.last = now;
+    g.drawImage(img, 0, 0, W, H);
+    const target = screenColor(g.getImageData(0, 0, W, H).data, screenMode);
+    const k = 1 - $('smooth').value / 100;
+    me.rgb = me.rgb ? me.rgb.map((c, i) => c + (target[i] - c) * k) : target;
+    const rgb = me.rgb.map(Math.round);
+    // Skip changes too small to see, so a still picture sends nothing.
+    if (!me.sent || rgb.some((c, i) => Math.abs(c - me.sent[i]) > 2)) {
+      send('color', CMD.color(...rgb));
+      me.sent = rgb;
+      $('screenPreview').style.background = `rgb(${rgb})`;
+    }
+  };
+
+  if (window.MediaStreamTrackProcessor) {
+    const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    (async () => {
+      while (screen === me) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        try { if (screen === me) frame(value); } finally { value.close(); }
+      }
+      reader.cancel().catch(() => {});
+    })();
+  } else {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.srcObject = stream;
+    await video.play();
+    me.timer = setInterval(() => frame(video), 100);
+  }
+
+  $('screenBtn').textContent = 'Stop screen sync';
+  $('screenBtn').className = 'off big';
+  $('screenNote').textContent = 'Following the screen. Picking a color, preset or effect, or starting the show, stops it.';
+}
+
+function stopScreen() {
+  if (!screen) return;
+  clearInterval(screen.timer);
+  screen.stream.getTracks().forEach(t => t.stop());
+  screen = null;
+  $('screenBtn').textContent = 'Sync with the screen';
+  $('screenBtn').className = 'primary big';
+  $('screenPreview').style.background = '#000';
+}
+
+function stopShows() { stopMusic(); stopScreen(); }
+
+$('screenBtn').onclick = () => {
+  if (!screen) { startScreen(); return; }
+  stopScreen();
+  send('color', CMD.color(...hexToRgb($('color').value)));
+};
+if (!navigator.mediaDevices?.getDisplayMedia) $('screenCard')?.remove();
 </script>
 </body>
 </html>

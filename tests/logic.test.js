@@ -7,7 +7,7 @@ const assert = require('assert');
 
 const html = fs.readFileSync(path.join(__dirname, '..', 'led-control.html'), 'utf8');
 const code = [...html.matchAll(/<script data-test>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join('\n');
-const page = new Function(code + '\nreturn { BeatSense: globalThis.BeatSense, BeatClock };')();
+const page = new Function(code + '\nreturn { BeatSense: globalThis.BeatSense, BeatClock, screenColor };')();
 
 let failed = 0;
 function test(name, fn) {
@@ -87,6 +87,31 @@ test('beat clock unlocks in silence', () => {
   s.set(drumLoop(120, 15, rate));
   const { clock } = runShow(s, rate);
   assert(!clock.locked);
+});
+
+// RGBA pixels: `count` of each [r, g, b].
+function picture(...parts) {
+  const px = [];
+  for (const [rgb, count] of parts) for (let i = 0; i < count; i++) px.push(...rgb, 255);
+  return new Uint8ClampedArray(px);
+}
+
+test('screen color: average is the plain mean', () => {
+  assert.deepStrictEqual(page.screenColor(picture([[200, 100, 0], 1], [[0, 100, 200], 1]), 'average'), [100, 100, 100]);
+});
+
+test('screen color: vivid takes the hue of a small bright red area on a dark screen', () => {
+  const [r, g, b] = page.screenColor(picture([[10, 10, 10], 90], [[255, 0, 0], 10]), 'vivid');
+  assert(r > 20 && g < r / 4 && b < r / 4, `got ${[r, g, b]}`);
+  assert(r < 60, `too bright for a mostly dark screen: ${r}`);
+});
+
+test('screen color: vivid keeps a white screen white', () => {
+  assert.deepStrictEqual(page.screenColor(picture([[255, 255, 255], 50]), 'vivid'), [255, 255, 255]);
+});
+
+test('screen color: black stays black', () => {
+  assert.deepStrictEqual(page.screenColor(picture([[0, 0, 0], 50]), 'vivid'), [0, 0, 0]);
 });
 
 if (failed) { console.log(failed + ' failed'); process.exit(1); }
