@@ -80,6 +80,22 @@
   .strip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .strip .name small { display: block; color: var(--muted); font-size: 12px; }
   .strip.dim .name { opacity: .55; }
+
+  .tags { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tag { display: inline-flex; }
+  .tag button:first-child { border-radius: 10px 0 0 10px; }
+  .tag button.x { border-radius: 0 10px 10px 0; border-left: none; padding: 9px 10px; color: var(--muted); }
+  input[type=text], input[type=time] { font: inherit; padding: 8px; border-radius: 10px; border: 1px solid var(--border);
+           background: var(--card); color: var(--text); }
+  input[type=text] { flex: 1; min-width: 120px; }
+  .days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .days button { padding: 7px 0; font-size: 13px; }
+  #schedules { display: grid; gap: 8px; }
+  #schedules:empty { display: none; }
+  .sched { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; }
+  .sched .when { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .sched small { display: block; color: var(--muted); font-size: 12px; }
+  .sched.dim .when, .sched.dim div { opacity: .5; }
 </style>
 </head>
 <body>
@@ -212,6 +228,16 @@
     </div>
 
     <div class="card">
+      <div class="label">Scenes</div>
+      <div class="tags" id="scenes"></div>
+      <div class="row">
+        <input type="text" id="sceneName" placeholder="Name, e.g. Sofa evening" maxlength="24">
+        <button id="sceneSave">Save current</button>
+      </div>
+      <p class="note">A scene keeps the current color, brightness and effect, so you can bring it back with one tap or schedule it.</p>
+    </div>
+
+    <div class="card">
       <div class="label">Built-in effects</div>
       <div class="presets" id="effects"></div>
       <div class="row">
@@ -222,6 +248,24 @@
       </div>
       <p class="note">The controller has 210 built-in effects. Step through them with ◀ ▶.</p>
     </div>
+  </div>
+
+  <div class="card">
+    <div class="label">Schedules</div>
+    <div id="schedules"></div>
+    <div class="row">
+      <input type="time" id="schAt" value="07:00" required>
+      <select id="schAction">
+        <option value="scene">Scene</option>
+        <option value="wake">Wake-up fade to</option>
+        <option value="off">Turn off</option>
+      </select>
+      <select id="schScene"></select>
+      <span id="schMinWrap" class="row" style="gap:6px"><span>over</span><input type="number" id="schMin" min="1" max="60" value="20"><span>min</span></span>
+    </div>
+    <div class="days" id="schDays"></div>
+    <div class="row"><button id="schAdd" class="primary">Add schedule</button></div>
+    <p class="note" id="schNote">Schedules run while this page is open, even in a background tab, and a strip is connected. A wake-up fade starts that many minutes early and reaches full brightness at the time you set.</p>
   </div>
 </main>
 
@@ -567,6 +611,29 @@ function screenColor(px, mode) {
   }
   return c.map(x => Math.round(Math.min(255, x)));
 }
+
+// Schedules: { id, at: 'HH:MM', days: [0-6, Sunday = 0], action: 'scene' | 'wake' | 'off',
+// scene: { name, color: '#rrggbb', bright, effect }, minutes, on }. A wake-up fade starts
+// `minutes` before `at` and reaches the scene's brightness at `at`. The Android app's
+// Schedules.kt computes the same times.
+
+/** Next time (ms) after `from` (ms) that the schedule starts, or null if it has no days. */
+function nextFire(sch, from) {
+  const [h, m] = sch.at.split(':').map(Number);
+  const lead = sch.action === 'wake' ? sch.minutes * 60000 : 0;
+  for (let d = 0; d <= 8; d++) {
+    const t = new Date(from);
+    t.setDate(t.getDate() + d);
+    t.setHours(h, m, 0, 0);
+    if (sch.days.includes(t.getDay()) && t.getTime() - lead > from) return t.getTime() - lead;
+  }
+  return null;
+}
+
+/** Brightness t ms into a fade of total ms up to target: eased in, so it looks even to the eye. */
+function fadeLevel(t, total, target) {
+  return Math.max(1, Math.round(target * Math.min(1, Math.max(0, t / total)) ** 2));
+}
 </script>
 <script>
 // LEDDMX-xx controller (LED LAMP app). Service ffe0, characteristic ffe1, 9-byte frames.
@@ -765,13 +832,19 @@ $('connect').onclick = async () => {
 };
 
 // Power: all strips
-$('pon').onclick = () => { strips.forEach(s => { s.off = false; }); send('power', CMD.on()); renderStrips(); };
-$('poff').onclick = () => send('power', CMD.off());
+function powerAll(on) {
+  if (on) strips.forEach(s => { s.off = false; });
+  send('power', on ? CMD.on() : CMD.off());
+  renderStrips();
+}
+$('pon').onclick = () => powerAll(true);
+$('poff').onclick = () => powerAll(false);
 
 // Color
 function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
 function setColor(hex) {
   stopShows();
+  currentEffect = 0;
   $('color').value = hex;
   $('hex').textContent = hex.toUpperCase();
   send('color', CMD.color(...hexToRgb(hex)));
@@ -792,7 +865,7 @@ function setBright(p) {
   $('brightVal').textContent = p + '%';
   send('bright', CMD.bright(p));
 }
-$('bright').oninput = (e) => setBright(+e.target.value);
+$('bright').oninput = (e) => { stopWake(); setBright(+e.target.value); };
 
 // Presets: color + brightness
 const PRESETS = [
@@ -803,14 +876,16 @@ const PRESETS = [
 for (const [name, hex, br] of PRESETS) {
   const b = document.createElement('button');
   b.textContent = name;
-  b.onclick = () => { send('power', CMD.on()); setColor(hex); setBright(br); };
+  b.onclick = () => applyScene({ name, color: hex, bright: br, effect: 0 });
   $('presets').append(b);
 }
 
 // Effects
+let currentEffect = 0; // 0 while showing a plain color
 function setEffect(i) {
   stopShows();
   i = Math.max(1, Math.min(210, i));
+  currentEffect = i;
   $('effNum').value = i;
   send('effect', CMD.effect(i));
 }
@@ -922,7 +997,7 @@ async function getAudio() {
 }
 
 async function startMusic() {
-  stopScreen();
+  stopScreen(); stopWake();
   let stream;
   try { stream = await getAudio(); }
   catch (e) {
@@ -1141,7 +1216,7 @@ for (const b of $('screenMode').children) {
 }
 
 async function startScreen() {
-  stopMusic();
+  stopMusic(); stopWake();
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false, selfBrowserSurface: 'exclude' });
@@ -1208,7 +1283,7 @@ function stopScreen() {
   $('screenPreview').style.background = '#000';
 }
 
-function stopShows() { stopMusic(); stopScreen(); }
+function stopShows() { stopMusic(); stopScreen(); stopWake(); }
 
 $('screenBtn').onclick = () => {
   if (!screen) { startScreen(); return; }
@@ -1216,6 +1291,176 @@ $('screenBtn').onclick = () => {
   send('color', CMD.color(...hexToRgb($('color').value)));
 };
 if (!navigator.mediaDevices?.getDisplayMedia) $('screenCard')?.remove();
+
+// ---------------------------------------------------------------------------
+// Scenes and schedules, saved in this browser (or in the Android app).
+
+const store = {
+  get(key, fallback) {
+    try { return JSON.parse(localStorage.getItem('wallled.' + key)) ?? fallback; } catch { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem('wallled.' + key, JSON.stringify(value)); } catch {}
+  },
+};
+
+function applyScene(sc) {
+  powerAll(true);
+  if (sc.effect) setEffect(sc.effect); else setColor(sc.color);
+  setBright(sc.bright);
+}
+
+let scenes = store.get('scenes', []);
+function renderScenes() {
+  $('scenes').replaceChildren(...scenes.map((sc) => {
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.innerHTML = '<button></button><button class="x" title="Delete">✕</button>';
+    const [b, x] = tag.children;
+    b.textContent = sc.name;
+    b.title = sc.effect ? `Effect ${sc.effect}, ${sc.bright}%` : `${sc.color.toUpperCase()}, ${sc.bright}%`;
+    b.onclick = () => applyScene(sc);
+    x.onclick = () => { scenes = scenes.filter(o => o !== sc); store.set('scenes', scenes); renderScenes(); };
+    return tag;
+  }));
+  renderSceneChoices();
+}
+$('sceneSave').onclick = () => {
+  const name = $('sceneName').value.trim() || `Scene ${scenes.length + 1}`;
+  const sc = { name, color: $('color').value, bright: +$('bright').value, effect: currentEffect };
+  scenes = [...scenes.filter(o => o.name !== name), sc];
+  store.set('scenes', scenes);
+  $('sceneName').value = '';
+  renderScenes();
+};
+
+// Schedules pick from the saved scenes and the presets.
+const sceneChoices = () => [...scenes, ...PRESETS.map(([name, color, bright]) => ({ name, color, bright, effect: 0 }))];
+function renderSceneChoices() {
+  const keep = $('schScene').value;
+  $('schScene').replaceChildren(...sceneChoices().map((sc, i) => new Option(sc.name, i)));
+  if (keep && keep < $('schScene').options.length) $('schScene').value = keep;
+}
+
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEK = [1, 2, 3, 4, 5, 6, 0]; // Monday first
+const dayButtons = WEEK.map((d) => {
+  const b = document.createElement('button');
+  b.textContent = DAY_NAMES[d];
+  b.dataset.v = d;
+  b.className = 'sel';
+  b.onclick = () => b.classList.toggle('sel');
+  $('schDays').append(b);
+  return b;
+});
+const syncActionFields = () => {
+  $('schScene').style.display = $('schAction').value === 'off' ? 'none' : '';
+  $('schMinWrap').style.display = $('schAction').value === 'wake' ? '' : 'none';
+};
+$('schAction').onchange = syncActionFields;
+
+function daysText(days) {
+  const key = [...days].sort().join();
+  if (days.length === 7) return 'Every day';
+  if (key === '1,2,3,4,5') return 'Weekdays';
+  if (key === '0,6') return 'Weekends';
+  return WEEK.filter(d => days.includes(d)).map(d => DAY_NAMES[d]).join(', ');
+}
+function actionText(sch) {
+  if (sch.action === 'off') return 'Turn off';
+  if (sch.action === 'wake') return `Wake-up fade to ${sch.scene.name} over ${sch.minutes} min`;
+  return sch.scene.name;
+}
+
+let schedules = store.get('schedules', []);
+const nextAt = new Map(); // schedule id -> next start (ms), for the in-page runner
+// The Android app runs schedules itself, with alarms, so they also work while it is closed.
+const nativeSchedules = typeof window.AndroidBle?.setSchedules === 'function';
+
+function saveSchedules() {
+  store.set('schedules', schedules);
+  if (nativeSchedules) AndroidBle.setSchedules(JSON.stringify(schedules));
+  nextAt.clear();
+  renderSchedules();
+}
+
+function renderSchedules() {
+  const now = Date.now();
+  $('schedules').replaceChildren(...[...schedules].sort((a, b) => a.at.localeCompare(b.at)).map((sch) => {
+    const row = document.createElement('div');
+    row.className = 'sched' + (sch.on ? '' : ' dim');
+    row.innerHTML = '<label class="check"><input type="checkbox"></label><div><span class="when"></span><small></small></div><button title="Delete">✕</button>';
+    const [check, del] = [row.querySelector('input'), row.querySelector('button')];
+    row.querySelector('.when').textContent = sch.at;
+    const next = sch.on && nextFire(sch, now);
+    row.querySelector('small').textContent = `${actionText(sch)} · ${daysText(sch.days)}` +
+      (next ? ` · next ${new Date(next).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}` : '');
+    check.checked = sch.on;
+    check.onchange = () => { sch.on = check.checked; saveSchedules(); };
+    del.onclick = () => { schedules = schedules.filter(o => o !== sch); saveSchedules(); };
+    return row;
+  }));
+}
+
+$('schAdd').onclick = () => {
+  const days = dayButtons.filter(b => b.classList.contains('sel')).map(b => +b.dataset.v);
+  if (!$('schAt').value || !days.length) { $('schNote').textContent = 'Pick a time and at least one day.'; return; }
+  const action = $('schAction').value;
+  const sch = {
+    id: Date.now().toString(36), at: $('schAt').value, days, action, on: true,
+    scene: action === 'off' ? null : sceneChoices()[+$('schScene').value],
+    minutes: Math.max(1, Math.min(60, +$('schMin').value || 20)),
+  };
+  schedules = [...schedules, sch];
+  saveSchedules();
+};
+
+// Wake-up fade in the page: the brightness follows the clock, so a throttled background tab
+// only makes the steps coarser.
+let wake = null;
+function startWake(sc, start, total) {
+  applyScene({ ...sc, bright: fadeLevel(Date.now() - start, total, sc.bright) });
+  const step = () => {
+    const t = Date.now() - start;
+    setBright(fadeLevel(t, total, sc.bright));
+    if (t >= total) stopWake();
+  };
+  wake = setInterval(step, 5000);
+}
+function stopWake() {
+  clearInterval(wake);
+  wake = null;
+}
+
+function runSchedule(sch, at) {
+  if (sch.action === 'off') { stopShows(); powerAll(false); }
+  else if (sch.action === 'wake') startWake(sch.scene, at, sch.minutes * 60000);
+  else applyScene(sch.scene);
+}
+
+function checkSchedules() {
+  const now = Date.now();
+  for (const sch of schedules) {
+    if (!sch.on) continue;
+    if (!nextAt.has(sch.id)) nextAt.set(sch.id, nextFire(sch, now));
+    const at = nextAt.get(sch.id);
+    if (at == null || now < at) continue;
+    // Skip one missed by more than 10 minutes, e.g. while the computer was asleep.
+    if (now - at < 10 * 60000) runSchedule(sch, at);
+    nextAt.set(sch.id, nextFire(sch, now));
+    renderSchedules();
+  }
+}
+
+renderScenes();
+syncActionFields();
+renderSchedules();
+if (nativeSchedules) {
+  AndroidBle.setSchedules(JSON.stringify(schedules));
+  $('schNote').textContent = 'Schedules run in the background, even when the app is closed, on the strips this phone has connected before. Keep them in range and the LED LAMP app closed. A wake-up fade starts that many minutes early and reaches full brightness at the time you set.';
+} else {
+  setInterval(checkSchedules, 15000);
+}
 </script>
 </body>
 </html>

@@ -17,6 +17,7 @@ import android.webkit.WebView
 class MainActivity : Activity() {
     private lateinit var web: WebView
     private var pendingMic: PermissionRequest? = null
+    private var askedNotifications = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -26,6 +27,7 @@ class MainActivity : Activity() {
 
         web.settings.javaScriptEnabled = true
         web.settings.mediaPlaybackRequiresUserGesture = false
+        web.settings.domStorageEnabled = true // saved scenes and schedules
         LedBle.init(this)
         LedBle.js = { js -> runOnUiThread { web.evaluateJavascript(js, null) } }
         web.addJavascriptInterface(Bridge(), "AndroidBle")
@@ -81,6 +83,16 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun write(key: String, hex: String) = LedBle.write(key, hex)
 
+        /** The page's schedules as JSON; alarms run them, also while the app is closed. */
+        @JavascriptInterface
+        fun setSchedules(json: String) {
+            Schedules.save(this@MainActivity, json)
+            if (json.length > 2 && !has(Manifest.permission.POST_NOTIFICATIONS) && !askedNotifications) {
+                askedNotifications = true
+                runOnUiThread { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY) }
+            }
+        }
+
         @JavascriptInterface
         fun keepScreenOn(on: Boolean) = runOnUiThread {
             if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -91,5 +103,6 @@ class MainActivity : Activity() {
     private companion object {
         const val REQ_BT = 1
         const val REQ_MIC = 2
+        const val REQ_NOTIFY = 3
     }
 }
