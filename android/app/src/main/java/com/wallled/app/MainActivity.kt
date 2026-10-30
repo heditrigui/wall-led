@@ -16,7 +16,6 @@ import android.webkit.WebView
  */
 class MainActivity : Activity() {
     private lateinit var web: WebView
-    private lateinit var ble: LedBle
     private var pendingMic: PermissionRequest? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,7 +26,8 @@ class MainActivity : Activity() {
 
         web.settings.javaScriptEnabled = true
         web.settings.mediaPlaybackRequiresUserGesture = false
-        ble = LedBle(this) { js -> runOnUiThread { web.evaluateJavascript(js, null) } }
+        LedBle.init(this)
+        LedBle.js = { js -> runOnUiThread { web.evaluateJavascript(js, null) } }
         web.addJavascriptInterface(Bridge(), "AndroidBle")
 
         web.webChromeClient = object : WebChromeClient() {
@@ -47,7 +47,7 @@ class MainActivity : Activity() {
         val html = assets.open("index.html").bufferedReader().use { it.readText() }
         web.loadDataWithBaseURL("https://wallled.app/", html, "text/html", "utf-8", null)
 
-        if (!ble.hasPermissions()) requestPermissions(LedBle.PERMISSIONS, REQ_BT)
+        if (!LedBle.hasPermissions()) requestPermissions(LedBle.PERMISSIONS, REQ_BT)
     }
 
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, results: IntArray) {
@@ -60,7 +60,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        ble.disconnect()
+        LedBle.js = null
+        LedBle.disconnectPage()
         web.destroy()
         super.onDestroy()
     }
@@ -69,16 +70,16 @@ class MainActivity : Activity() {
 
     inner class Bridge {
         @JavascriptInterface
-        fun connect() {
-            if (!ble.hasPermissions()) runOnUiThread { requestPermissions(LedBle.PERMISSIONS, REQ_BT) }
-            ble.connect()
+        fun connect(key: String) {
+            if (!LedBle.hasPermissions()) runOnUiThread { requestPermissions(LedBle.PERMISSIONS, REQ_BT) }
+            LedBle.connect(key)
         }
 
         @JavascriptInterface
-        fun disconnect() = ble.disconnect()
+        fun disconnect(key: String) = LedBle.disconnect(key)
 
         @JavascriptInterface
-        fun write(hex: String) = ble.write(hex)
+        fun write(key: String, hex: String) = LedBle.write(key, hex)
 
         @JavascriptInterface
         fun keepScreenOn(on: Boolean) = runOnUiThread {

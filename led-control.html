@@ -70,6 +70,14 @@
   .dj kbd { display: block; font: 11px ui-monospace, monospace; opacity: .6; font-weight: 400; margin-top: 2px; }
   label.check { display: flex; gap: 8px; align-items: center; font-size: 14px; cursor: pointer; }
   label.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+
+  #strips { display: grid; gap: 8px; }
+  #strips:empty { display: none; }
+  .strip { display: grid; grid-template-columns: 1fr auto auto auto; gap: 6px; align-items: center; }
+  .strip button { padding: 6px 12px; }
+  .strip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .strip .name small { display: block; color: var(--muted); font-size: 12px; }
+  .strip.dim .name { opacity: .55; }
 </style>
 </head>
 <body>
@@ -83,6 +91,7 @@
     <div class="row">
       <button id="connect" class="primary big">Connect</button>
     </div>
+    <div id="strips"></div>
     <p class="note" id="hint">Close the LED LAMP app on your phone first: the strip accepts only one connection at a time. Use Chrome or Edge. No strip? <a href="?demo">Try the demo</a>.</p>
   </div>
 
@@ -210,97 +219,143 @@ const CMD = {
 };
 
 const $ = (id) => document.getElementById(id);
-let device = null, ch = null, wantConnected = false;
+const hex = (bytes) => [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
 
 // Inside the Android app there is no Web Bluetooth: provide the small part of it this page
-// uses, backed by the app's native bridge (window.AndroidBle).
+// uses, backed by the app's native bridge (window.AndroidBle). Each requestDevice() makes a new
+// link that the app connects to the next LEDDMX strip it finds that isn't connected yet.
 if (window.AndroidBle && !navigator.bluetooth) {
-  const onDisconnect = [];
-  let pendingConnect = null;
-  const characteristic = {
-    writeValueWithoutResponse: async (bytes) =>
-      AndroidBle.write([...bytes].map(b => b.toString(16).padStart(2, '0')).join('')),
-  };
-  const server = { getPrimaryService: async () => ({ getCharacteristic: async () => characteristic }) };
-  const nativeDevice = {
-    name: 'LEDDMX',
-    addEventListener: (type, fn) => { if (type === 'gattserverdisconnected') onDisconnect.push(fn); },
-    gatt: {
-      connect: () => new Promise((resolve, reject) => { pendingConnect = { resolve, reject }; AndroidBle.connect(); }),
-      disconnect: () => AndroidBle.disconnect(),
-    },
-  };
+  const links = {};
+  let n = 0;
   window.__ble = {
-    onStatus(state, detail) {
-      const p = pendingConnect;
-      if (state === 'connected') { nativeDevice.name = detail; pendingConnect = null; p?.resolve(server); }
-      else if (state === 'failed') { pendingConnect = null; p?.reject(new Error(detail)); $('hint').textContent = detail; }
-      else if (state === 'disconnected') onDisconnect.forEach(fn => fn());
+    onStatus(key, state, detail) {
+      const l = links[key];
+      if (!l) return;
+      const p = l.pendingConnect;
+      if (state === 'connected') { l.device.name = detail; l.pendingConnect = null; p?.resolve(l.server); }
+      else if (state === 'failed') { l.pendingConnect = null; p?.reject(new Error(detail)); $('hint').textContent = detail; }
+      else if (state === 'disconnected') l.onDisconnect.forEach(fn => fn());
     },
   };
-  Object.defineProperty(navigator, 'bluetooth', { value: { requestDevice: async () => nativeDevice } });
+  const newDevice = () => {
+    const key = 'p' + (++n);
+    const l = links[key] = { onDisconnect: [], pendingConnect: null };
+    const characteristic = { writeValueWithoutResponse: async (bytes) => AndroidBle.write(key, hex(bytes)) };
+    l.server = { getPrimaryService: async () => ({ getCharacteristic: async () => characteristic }) };
+    l.device = {
+      id: key, name: 'LEDDMX',
+      addEventListener: (type, fn) => { if (type === 'gattserverdisconnected') l.onDisconnect.push(fn); },
+      gatt: {
+        connect: () => new Promise((resolve, reject) => { l.pendingConnect = { resolve, reject }; AndroidBle.connect(key); }),
+        disconnect: () => AndroidBle.disconnect(key),
+      },
+    };
+    return l.device;
+  };
+  Object.defineProperty(navigator, 'bluetooth', { value: { requestDevice: async () => newDevice() } });
   addEventListener('DOMContentLoaded', () => {
-    $('hint').textContent = 'Close the LED LAMP app first: the strip accepts only one connection at a time.';
+    $('hint').textContent = 'Close the LED LAMP app first: a strip accepts only one connection at a time. Tap Add a strip again to connect more strips.';
     $('source').querySelector('[data-v=pc]').remove();
     $('palettes').closest('.card').querySelector('.note').textContent =
       'Picking a color, preset or effect below stops the show. The screen stays on while the show runs.';
   });
 }
 
-// One write at a time; while a write is in flight, keep only the latest pending frame per kind
-// so dragging a slider doesn't build up a backlog.
-const pending = new Map();
-let busy = false;
+// Every connected strip gets every command, so several strips stay in sync. A strip switched
+// off on its own row is left out until it is switched on again.
+// Per strip, one write at a time; while a write is in flight, keep only the latest pending frame
+// per kind so dragging a slider doesn't build up a backlog.
+const strips = [];
 function send(kind, bytes) {
-  pending.set(kind, bytes);
-  pump();
+  for (const s of strips) if (!s.off || kind === 'power') sendTo(s, kind, bytes);
 }
-async function pump() {
-  if (busy || !ch) return;
-  busy = true;
+function sendTo(s, kind, bytes) {
+  s.pending.set(kind, bytes);
+  pump(s);
+}
+async function pump(s) {
+  if (s.busy || !s.ch) return;
+  s.busy = true;
   try {
-    while (pending.size && ch) {
-      const [kind, bytes] = pending.entries().next().value;
-      pending.delete(kind);
-      try { await ch.writeValueWithoutResponse(bytes); }
-      catch (e) { console.warn('write failed', e); }
+    while (s.pending.size && s.ch) {
+      const [kind, bytes] = s.pending.entries().next().value;
+      s.pending.delete(kind);
+      try { await s.ch.writeValueWithoutResponse(bytes); }
+      catch (e) { console.warn('write failed', s.name, e); }
       await new Promise(r => setTimeout(r, 40));
     }
-  } finally { busy = false; }
+  } finally { s.busy = false; }
+}
+function setStripPower(s, on) {
+  s.off = !on;
+  sendTo(s, 'power', on ? CMD.on() : CMD.off());
+  renderStrips();
 }
 
-function setStatus(text, ok) {
-  $('status').textContent = text;
-  $('status').className = ok ? 'ok' : '';
-  $('controls').classList.toggle('disabled', !ok);
-  $('connect').textContent = ok ? 'Disconnect' : 'Connect';
+function renderStrips() {
+  const ready = strips.filter(s => s.ch).length;
+  $('status').textContent = demo ? 'Demo mode: no strip'
+    : ready ? `${ready} strip${ready > 1 ? 's' : ''} connected`
+    : strips.length ? 'Connecting…' : 'Not connected';
+  $('status').className = ready ? 'ok' : '';
+  $('controls').classList.toggle('disabled', !ready);
+  $('connect').textContent = demo ? 'Leave demo' : strips.length ? 'Add a strip' : 'Connect';
+  $('strips').replaceChildren(...strips.map((s) => {
+    const row = document.createElement('div');
+    row.className = 'strip' + (s.off || !s.ch ? ' dim' : '');
+    row.innerHTML = '<div class="name"></div><button class="on">On</button><button class="off">Off</button><button title="Disconnect">✕</button>';
+    row.querySelector('.name').textContent = s.name;
+    const small = document.createElement('small');
+    small.textContent = s.state + (s.ch && s.off ? ', switched off' : '');
+    row.querySelector('.name').append(small);
+    const [on, off, remove] = row.querySelectorAll('button');
+    on.onclick = () => setStripPower(s, true);
+    off.onclick = () => setStripPower(s, false);
+    on.disabled = off.disabled = !s.ch;
+    remove.onclick = () => removeStrip(s);
+    return row;
+  }));
 }
+function setStatus(text) { $('hint').textContent = text; }
 
-async function connectGatt() {
-  setStatus('Connecting…');
-  for (let attempt = 1; attempt <= 3; attempt++) {
+async function connectGatt(s) {
+  s.state = 'Connecting…'; renderStrips();
+  for (let attempt = 1; attempt <= 3 && s.wantConnected; attempt++) {
     try {
-      const server = await device.gatt.connect();
+      const server = await s.device.gatt.connect();
       const svc = await server.getPrimaryService(SERVICE);
-      ch = await svc.getCharacteristic(CHAR);
-      setStatus('Connected: ' + device.name, true);
-      return;
+      s.ch = await svc.getCharacteristic(CHAR);
+      s.name = s.device.name || s.name;
+      s.state = 'Connected';
+      renderStrips();
+      pump(s);
+      return true;
     } catch (e) {
       console.warn('connect attempt', attempt, e);
       await new Promise(r => setTimeout(r, 800));
     }
   }
-  setStatus('Could not connect. Is the phone app closed?');
+  s.state = 'Could not connect. Is the phone app closed?';
+  renderStrips();
+  return false;
+}
+
+function removeStrip(s) {
+  s.wantConnected = false;
+  if (strips.includes(s)) strips.splice(strips.indexOf(s), 1);
+  if (s.ch) s.device.gatt.disconnect();
+  s.ch = null;
+  renderStrips();
 }
 
 // Demo mode (?demo): every control works and the music show runs, but nothing is sent anywhere.
 const demo = new URLSearchParams(location.search).has('demo');
+const fakeStrip = (name) => ({ name, state: 'Demo', ch: { writeValueWithoutResponse: async () => {} }, pending: new Map(), off: false });
 if (demo) {
-  ch = { writeValueWithoutResponse: async () => {} };
+  strips.push(fakeStrip('Demo strip 1'), fakeStrip('Demo strip 2'));
   addEventListener('DOMContentLoaded', () => {
-    setStatus('Demo mode: no strip', true);
-    $('connect').textContent = 'Leave demo';
-    $('hint').textContent = 'Nothing is sent to a strip in demo mode. The colour square in the Music card shows what the strip would do.';
+    renderStrips();
+    $('hint').textContent = 'Nothing is sent to a strip in demo mode. The colour square in the Music card shows what the strips would do.';
   });
 }
 
@@ -309,36 +364,45 @@ $('connect').onclick = async () => {
     location.search = '';
     return;
   }
-  if (ch) {
-    wantConnected = false;
-    device.gatt.disconnect();
-    return;
-  }
   if (!navigator.bluetooth) {
     setStatus('Web Bluetooth not available. Open this page in Chrome or Edge.');
     return;
   }
+  let device;
   try {
-    if (!device) {
-      device = await navigator.bluetooth.requestDevice({
-        filters: [{ namePrefix: 'LEDDMX' }, { services: [SERVICE] }],
-        optionalServices: [SERVICE],
-      });
-      device.addEventListener('gattserverdisconnected', () => {
-        ch = null;
-        setStatus('Disconnected');
-        if (wantConnected) setTimeout(connectGatt, 1000);
-      });
-    }
-    wantConnected = true;
-    await connectGatt();
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'LEDDMX' }, { services: [SERVICE] }],
+      optionalServices: [SERVICE],
+    });
   } catch (e) {
     if (e.name !== 'NotFoundError') setStatus('Error: ' + e.message);
+    return;
+  }
+  if (strips.some(s => s.device === device || s.device?.id === device.id)) {
+    setStatus(device.name + ' is already connected.');
+    return;
+  }
+  const s = { device, name: device.name || 'LEDDMX', state: '', ch: null, pending: new Map(), busy: false, off: false, wantConnected: true };
+  strips.push(s);
+  device.addEventListener('gattserverdisconnected', () => {
+    s.ch = null;
+    s.state = 'Disconnected';
+    renderStrips();
+    if (s.wantConnected) setTimeout(() => connectGatt(s), 1000);
+  });
+  if (!await connectGatt(s)) {
+    if (s.wantConnected) setStatus('Could not connect to ' + s.name + '. Is the phone app closed?');
+    removeStrip(s);
+  } else if (strips.some(o => o !== s && o.ch)) {
+    // A strip added next to others joins in their state: on, same color and brightness.
+    sendTo(s, 'power', CMD.on());
+    if (!music) sendTo(s, 'color', CMD.color(...hexToRgb($('color').value)));
+    sendTo(s, 'bright', CMD.bright(+$('bright').value));
   }
 };
 
-// Power
-$('pon').onclick = () => send('power', CMD.on());
+// Power: all strips
+$('pon').onclick = () => { strips.forEach(s => { s.off = false; }); send('power', CMD.on()); renderStrips(); };
 $('poff').onclick = () => send('power', CMD.off());
 
 // Color
